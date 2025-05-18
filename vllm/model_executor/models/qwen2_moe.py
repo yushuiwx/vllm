@@ -123,19 +123,21 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                                      config.num_experts,
                                      bias=False,
                                      quant_config=None)
-        if config.shared_expert_intermediate_size > 0:
-            self.shared_expert = Qwen2MoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.shared_expert_intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=False,
-            )
-        else:
-            self.shared_expert = None
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
-                                                  1,
-                                                  bias=False)
+        # if config.shared_expert_intermediate_size > 0:
+        #     self.shared_expert = Qwen2MoeMLP(
+        #         hidden_size=config.hidden_size,
+        #         intermediate_size=config.shared_expert_intermediate_size,
+        #         hidden_act=config.hidden_act,
+        #         quant_config=quant_config,
+        #         reduce_results=False,
+        #     )
+        # else:
+        #     self.shared_expert = None
+        # self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
+        #                                           1,
+        #                                           bias=False)
+        self.shared_expert = None
+        self.shared_expert_gate = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
