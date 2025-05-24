@@ -89,6 +89,36 @@ class Qwen2MoeMLP(nn.Module):
         return x
 
 
+
+def relu_topk_routing(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    """
+    Args:
+        hidden_states: [batch, hidden]  (没实际用到)
+        gating_output: [batch, n_experts]
+        topk: 选择前K大
+        renormalize: 是否对topk weights归一化
+    Returns:
+        topk_weights: [batch, topk]
+        topk_ids: [batch, topk]
+    """
+    # 1. ReLU 处理
+    relu_scores = torch.relu(gating_output)
+    # 2. top-k
+    topk_weights, topk_ids = torch.topk(relu_scores, k=topk, dim=-1)
+
+    # 3. 可选归一化
+    if renormalize:
+        denom = topk_weights.sum(dim=-1, keepdim=True) + 1e-9  # 防止除0
+        topk_weights = topk_weights / denom
+
+    return topk_weights, topk_ids
+
+
 class Qwen2MoeSparseMoeBlock(nn.Module):
 
     def __init__(
@@ -105,12 +135,14 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 f"the number of experts {config.num_experts}.")
 
         self.experts = FusedMoE(num_experts=config.num_experts,
-                                top_k=config.num_experts_per_tok,
+                                # top_k=config.num_experts_per_tok,
+                                top_k=config.num_experts, # here we set top_k == num_experts for a simple implementations
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.moe_intermediate_size,
                                 reduce_results=False,
                                 renormalize=config.norm_topk_prob,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                custom_routing_function=relu_topk_routing)
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
