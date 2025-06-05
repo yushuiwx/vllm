@@ -105,9 +105,13 @@ class ActQuant(torch.autograd.Function):
 
 class BitLinear(nn.Linear):
 
+    def __init__(self):
+        self.norm = RMSNorm(in_features, eps=1e-8)
+
     def forward(self, input):
         # weight = WeightQuant.apply(self.weight) # online weight quantization
         weight = self.weight # offline weight quantization
+        input = self.norm(input)
         input = ActQuant.apply(input)
         return F.linear(input, weight, self.bias)
 
@@ -303,6 +307,7 @@ class BitNetDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        assert residual is None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
