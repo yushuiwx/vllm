@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding, UnquantizedEmbeddingMethod)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
@@ -559,6 +559,7 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             #                                   prefix=maybe_prefix(
             #                                       prefix, "lm_head"))
             self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
+            self.lm_head.quant_method = UnquantizedEmbeddingMethod()
         else:
             self.lm_head = PPMissingLayer()
 
