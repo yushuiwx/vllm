@@ -309,7 +309,6 @@ class BitNetDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        assert residual is None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
