@@ -458,6 +458,8 @@ class BitNetModel(nn.Module):
             is_offline_quant_param = False
             for offline_quant_param in offline_quant_params:
                 if offline_quant_param in name:
+                    if 'bias' in name:
+                        continue
                     print(f"Loading offline quantization weights for {name}")
                     # Loading offline quantization weights
                     param = params_dict[name]
