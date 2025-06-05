@@ -433,17 +433,14 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
-                print("*" * 100)
                 self.lm_head = self.model.embed_tokens
             else:
-                print("$" * 100)
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
                                               quant_config=quant_config,
                                               prefix=maybe_prefix(
                                                   prefix, "lm_head"))
         else:
-            print("#" * 100)
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
