@@ -557,7 +557,7 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             #                                   quant_config=quant_config,
             #                                   prefix=maybe_prefix(
             #                                       prefix, "lm_head"))
-            self.lm_head = BitLinear(config.vocab_size, config.hidden_size, bias=False)
+            self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
         else:
             self.lm_head = PPMissingLayer()
 
