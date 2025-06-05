@@ -105,8 +105,9 @@ class ActQuant(torch.autograd.Function):
 
 class BitLinear(nn.Linear):
 
-    def __init__(self, bias=False):
-        super(BitLinear, self).__init__(in_features, out_features, bias=bias)
+    def __init__(self, in_features, out_features, bias=False):
+        super().__init__(in_features, out_features, bias=bias)
+        # super(BitLinear, self).__init__(in_features, out_features, bias=bias)
         self.norm = RMSNorm(in_features, eps=1e-8)
 
     def forward(self, input):
