@@ -3,7 +3,7 @@
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
-model_path = "/mnt/lingjiejiang/textual_aesthetics/exp/saves/bitnet_glan1.5/bitnet_glan1.5_default_template_2e5_e2_bsz128_trm4442/checkpoint-2000"
+model_path = "/mnt/msranlp/xun/BieNet_finetuning/training_results/debug/inference/huggingface_ckpt"
 sampling_params = SamplingParams(temperature=0.6, top_p=0.9, max_tokens=128)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 prompts = [
@@ -39,7 +39,7 @@ prompts = [
     for prompt in prompts
 ]
 # Create an LLM.
-llm = LLM(model="/mnt/lingjiejiang/textual_aesthetics/exp/saves/bitnet_glan1.5/bitnet_glan1.5_default_template_2e5_e2_bsz128_trm4442/checkpoint-2000", trust_remote_code=True)
+llm = LLM(model="/mnt/msranlp/xun/BieNet_finetuning/training_results/debug/inference/huggingface_ckpt", trust_remote_code=True)
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
