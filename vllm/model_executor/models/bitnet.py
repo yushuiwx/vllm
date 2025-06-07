@@ -550,16 +550,16 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
-            # if config.tie_word_embeddings:
-            #     self.lm_head = self.model.embed_tokens
-            # else:
-            #     self.lm_head = ParallelLMHead(config.vocab_size,
-            #                                   config.hidden_size,
-            #                                   quant_config=quant_config,
-            #                                   prefix=maybe_prefix(
-            #                                       prefix, "lm_head"))
-            self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
-            self.lm_head.quant_method = UnquantizedEmbeddingMethod()
+            if config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                              config.hidden_size,
+                                              quant_config=quant_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "lm_head"))
+            # self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
+            # self.lm_head.quant_method = UnquantizedEmbeddingMethod()
         else:
             self.lm_head = PPMissingLayer()
 
