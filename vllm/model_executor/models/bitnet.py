@@ -105,18 +105,26 @@ class ActQuant(torch.autograd.Function):
 
 class BitLinear(nn.Linear):
 
-    def __init__(self, in_features, out_features, bias=False):
+    def __init__(self, in_features, out_features, bias=False, norm=False):
         super().__init__(in_features, out_features, bias=bias)
         # super(BitLinear, self).__init__(in_features, out_features, bias=bias)
-        self.norm = RMSNorm(in_features, eps=1e-8)
+        self.should_norm = norm
+        if self.should_norm:
+            self.norm = RMSNorm(in_features, eps=1e-8)
 
     def forward(self, input):
         # weight = WeightQuant.apply(self.weight) # online weight quantization
         weight = self.weight # offline weight quantization
-        input = self.norm(input)
+        if self.should_norm
+            input = self.norm(input)
         input = ActQuant.apply(input)
         return F.linear(input, weight, self.bias)
 
+    # def forward(self, input):
+    #     # weight = WeightQuant.apply(self.weight) # online weight quantization
+    #     weight = self.weight # offline weight quantization
+    #     input = ActQuant.apply(input)
+    #     return F.linear(input, weight, self.bias)
 
 class BitNetMLP(nn.Module):
 
@@ -131,7 +139,7 @@ class BitNetMLP(nn.Module):
         super().__init__()
         self.gate_proj = BitLinear(hidden_size, intermediate_size, bias=False)
         self.up_proj = BitLinear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = BitLinear(intermediate_size, hidden_size, bias=False)
+        self.down_proj = BitLinear(intermediate_size, hidden_size, bias=False, norm=True)
 
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -218,7 +226,7 @@ class BitNetAttention(nn.Module):
         self.q_proj = BitLinear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.o_proj = BitLinear(self.total_num_heads * self.head_dim, hidden_size, bias=False)
+        self.o_proj = BitLinear(self.total_num_heads * self.head_dim, hidden_size, bias=False, norm=True)
 
         self.rotary_emb = get_rope(
             self.head_dim,
