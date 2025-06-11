@@ -115,7 +115,7 @@ class BitLinear(nn.Linear):
     def forward(self, input):
         # weight = WeightQuant.apply(self.weight) # online weight quantization
         weight = self.weight # offline weight quantization
-        if self.should_norm
+        if self.should_norm:
             input = self.norm(input)
         input = ActQuant.apply(input)
         return F.linear(input, weight, self.bias)
