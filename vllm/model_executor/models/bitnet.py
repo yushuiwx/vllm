@@ -188,7 +188,7 @@ class BitNetAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
-                 rms_norm_eps: float = 1e-06
+                 rms_norm_eps: float = 1e-06,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  rope_scaling: Optional[Tuple] = None,
