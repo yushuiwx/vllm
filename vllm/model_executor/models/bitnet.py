@@ -235,6 +235,8 @@ class BitNetAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -244,7 +246,22 @@ class BitNetAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
+
+        # qwen3 norm for q values
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
         k = self.k_proj(hidden_states)
+
+        # qwen3 norm for k values
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+        
+
         v = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
