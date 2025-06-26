@@ -188,6 +188,7 @@ class BitNetAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
+                 rms_norm_eps: float = 1e-06
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  rope_scaling: Optional[Tuple] = None,
@@ -260,7 +261,7 @@ class BitNetAttention(nn.Module):
                            self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        
+
 
         v = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
@@ -299,6 +300,7 @@ class BitNetDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            rms_norm_eps=config.rms_norm_eps,
             cache_config=cache_config,
             quant_config=quant_config,
             rope_scaling=rope_scaling,
