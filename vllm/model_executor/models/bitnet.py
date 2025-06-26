@@ -187,8 +187,9 @@ class BitNetAttention(nn.Module):
                  num_heads: int,
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
+                 head_dim: Optional[int] = None,
                  rms_norm_eps: float = 1e-06,
+                 rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  rope_scaling: Optional[Tuple] = None,
@@ -210,7 +211,7 @@ class BitNetAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -301,6 +302,7 @@ class BitNetDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             rms_norm_eps=config.rms_norm_eps,
+            head_dim=getattr(config, 'head_dim', None),
             cache_config=cache_config,
             quant_config=quant_config,
             rope_scaling=rope_scaling,
