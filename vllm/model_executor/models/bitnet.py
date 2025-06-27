@@ -246,7 +246,8 @@ class BitNetAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)Add commentMore actions
+                              
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
