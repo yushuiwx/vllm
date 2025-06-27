@@ -195,6 +195,8 @@ class BitNetAttention(nn.Module):
                  num_heads: int,
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
+                 head_dim: Optional[int] = None,
+                 rms_norm_eps: float = 1e-06,
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
@@ -217,7 +219,8 @@ class BitNetAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        # self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -243,6 +246,8 @@ class BitNetAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)Add commentMore actions
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -252,7 +257,22 @@ class BitNetAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
+
+        # qwen3 norm for q valuesAdd commentMore actions
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
         k = self.k_proj(hidden_states)
+
+        # qwen3 norm for k valuesAdd commentMore actions
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+
+
         v = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -290,6 +310,8 @@ class BitNetDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            rms_norm_eps=config.rms_norm_eps,
+            head_dim=getattr(config, 'head_dim', None),
             cache_config=cache_config,
             quant_config=quant_config,
             rope_scaling=rope_scaling,
