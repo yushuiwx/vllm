@@ -474,7 +474,7 @@ class BitNetModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Gemma3DecoderLayer(
+            lambda prefix: BitNetDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
