@@ -136,6 +136,68 @@ class Gemma3MLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+class BitNetMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_proj = BitLinear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = BitLinear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = BitLinear(intermediate_size, hidden_size, bias=False)
+
+        if hidden_activation != "gelu_pytorch_tanh":
+            raise ValueError(
+                "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
+                "function. Please set `hidden_act` and `hidden_activation` to "
+                "`gelu_pytorch_tanh`.")
+        self.act_fn = GeluAndMul(approximate="tanh")
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
+class QKVBitLinear(BitLinear):
+
+    def __init__(self,
+                 hidden_size: int,
+                 head_size: int,
+                 total_num_heads: int,
+                 total_num_kv_heads: Optional[int] = None,
+                 bias: bool = True,
+                 params_dtype: Optional[torch.dtype] = None,
+                 ):
+        self.hidden_size = hidden_size
+        self.head_size = head_size
+        self.total_num_heads = total_num_heads
+        if total_num_kv_heads is None:
+            total_num_kv_heads = total_num_heads
+        self.total_num_kv_heads = total_num_kv_heads
+        # Divide the weight matrix along the last dimension.
+        self.num_heads = self.total_num_heads
+        self.num_kv_heads = self.total_num_kv_heads
+        self.num_kv_head_replicas = 1
+        input_size = self.hidden_size
+        output_size = (self.num_heads +
+                       2 * self.num_kv_heads) * self.head_size
+        self.output_sizes = [
+            self.num_heads * self.head_size,  # q_proj
+            self.num_kv_heads * self.head_size,  # k_proj
+            self.num_kv_heads * self.head_size,  # v_proj 
+        ]
+
+        super().__init__(input_size,
+                         output_size,
+                         bias=bias,
+                         dtype=params_dtype,
+                         )
+
 
 class Gemma3Attention(nn.Module):
 
@@ -172,20 +234,24 @@ class Gemma3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.query_pre_attn_scalar**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-        )
+        # self.qkv_proj = QKVParallelLinear(
+        #     hidden_size,
+        #     self.head_dim,
+        #     self.total_num_heads,
+        #     self.total_num_kv_heads,
+        #     bias=config.attention_bias,
+        #     quant_config=quant_config,
+        # )
+        # self.o_proj = RowParallelLinear(
+        #     self.total_num_heads * self.head_dim,
+        #     hidden_size,
+        #     bias=config.attention_bias,
+        #     quant_config=quant_config,
+        # )
+        self.q_proj = BitLinear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = BitLinear(self.total_num_heads * self.head_dim, hidden_size, bias=False)
 
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
