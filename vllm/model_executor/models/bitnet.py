@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
-# Adapted from
-# Copyright 2024 The BitNet team.
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The vLLM team.
+# Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,43 +14,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only BitNet model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from torch import nn
-from .configuration_bitnet import BitNetConfig
+from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding, UnquantizedEmbeddingMethod)
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
+from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-
-import torch.nn.functional as F
 
 logger = init_logger(__name__)
 
@@ -102,7 +91,6 @@ class ActQuant(torch.autograd.Function):
         grad_input = grad_output.clone()
         return grad_input
 
-
 class BitLinear(nn.Linear):
 
     def __init__(self, in_features, out_features, bias=False):
@@ -117,85 +105,53 @@ class BitLinear(nn.Linear):
         input = ActQuant.apply(input)
         return F.linear(input, weight, self.bias)
 
-
-class BitNetMLP(nn.Module):
+class Gemma3MLP(nn.Module):
 
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
+        hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_proj = BitLinear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = BitLinear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = BitLinear(intermediate_size, hidden_size, bias=False)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config)
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config)
+        if hidden_activation != "gelu_pytorch_tanh":
+            raise ValueError(
+                "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
+                "function. Please set `hidden_act` and `hidden_activation` to "
+                "`gelu_pytorch_tanh`.")
+        self.act_fn = GeluAndMul(approximate="tanh")
 
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        # self.act_fn = SiluAndMul()
-        self.act_fn = nn.SiLU()
-
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
-class QKVBitLinear(BitLinear):
-
-    def __init__(self,
-                 hidden_size: int,
-                 head_size: int,
-                 total_num_heads: int,
-                 total_num_kv_heads: Optional[int] = None,
-                 bias: bool = True,
-                 params_dtype: Optional[torch.dtype] = None,
-                 ):
-        self.hidden_size = hidden_size
-        self.head_size = head_size
-        self.total_num_heads = total_num_heads
-        if total_num_kv_heads is None:
-            total_num_kv_heads = total_num_heads
-        self.total_num_kv_heads = total_num_kv_heads
-        # Divide the weight matrix along the last dimension.
-        self.num_heads = self.total_num_heads
-        self.num_kv_heads = self.total_num_kv_heads
-        self.num_kv_head_replicas = 1
-        input_size = self.hidden_size
-        output_size = (self.num_heads +
-                       2 * self.num_kv_heads) * self.head_size
-        self.output_sizes = [
-            self.num_heads * self.head_size,  # q_proj
-            self.num_kv_heads * self.head_size,  # k_proj
-            self.num_kv_heads * self.head_size,  # v_proj 
-        ]
-
-        super().__init__(input_size,
-                         output_size,
-                         bias=bias,
-                         dtype=params_dtype,
-                         )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
-class BitNetAttention(nn.Module):
+class Gemma3Attention(nn.Module):
 
     def __init__(self,
+                 config: Gemma3TextConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 head_dim: Optional[int] = None,
-                 rms_norm_eps: float = 1e-06,
-                 rope_theta: float = 10000,
+                 head_dim: int,
+                 max_position_embeddings: int,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rope_scaling: Optional[Tuple] = None,
-                 prefix: str = "",
-                 attn_type: str = AttentionType.DECODER) -> None:
+                 attn_logits_soft_cap: Optional[float] = None,
+                 prefix: str = "") -> None:
         super().__init__()
+        self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -211,125 +167,203 @@ class BitNetAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = head_dim or hidden_size // self.total_num_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
+        self.scaling = config.query_pre_attn_scalar**-0.5
 
-        self.q_proj = BitLinear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = BitLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.o_proj = BitLinear(self.total_num_heads * self.head_dim, hidden_size, bias=False)
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=config.attention_bias,
+            quant_config=quant_config,
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=config.attention_bias,
+            quant_config=quant_config,
+        )
 
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        # TODO(woosuk): Add reference to the original HF implementation.
+        layer_idx = extract_layer_index(prefix)
+        self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
+        # Initialize the rotary embedding.
+        if self.is_sliding:
+            # Local attention. Override the values in config.json.
+            self.rope_theta = config.rope_local_base_freq
+            self.rope_scaling = {"rope_type": "default"}
+            self.sliding_window = config.interleaved_sliding_window
+        else:
+            # Global attention. Use the values in config.json.
+            self.rope_theta = config.rope_theta
+            self.rope_scaling = config.rope_scaling
+            self.sliding_window = None
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position=max_position,
+            max_position=max_position_embeddings,
             base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            is_neox_style=True,
+            rope_scaling=self.rope_scaling,
         )
+
+        # Initialize the attention.
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=attn_type)
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+                              logits_soft_cap=attn_logits_soft_cap,
+                              per_layer_sliding_window=self.sliding_window,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        **kwargs,
     ) -> torch.Tensor:
-        q = self.q_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # qwen3 norm for q values
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                           self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
+        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+        q = self.q_norm(q)
+        q = q.flatten(-2, -1)
+        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+        k = self.k_norm(k)
+        k = k.flatten(-2, -1)
 
-        k = self.k_proj(hidden_states)
-
-        # qwen3 norm for k values
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                           self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
-
-
-        v = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output = self.o_proj(attn_output)
+        attn_output = self.attn(q, k, v)
+
+        if not kwargs.get("has_images", False):
+            # Fast path for text-only inputs. The performance for the text-only
+            # inputs are not affected by the naive attention below.
+            output, _ = self.o_proj(attn_output)
+            return output
+
+        # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
+        # that correspond to the same image while using causal attention
+        # otherwise. Current attention backends cannot handle this pattern, so
+        # we temporarily use a naive attention implementation with mask tensors.
+
+        # We intentionally keep the attention backend as-is and only override
+        # `attn_output` with the naive implementation's output. This minimizes
+        # changes to existing model runners and attention backends. The call to
+        # `self.attn(q, k, v)` is only used to populate the KV cache - its
+        # output is discarded and overwritten below. While this duplicates
+        # computation, it maintains compatibility.
+        # TODO(woosuk): Optimize by implementing custom attention kernels.
+        attn_output = self.naive_attn_with_masks(q,
+                                                 k,
+                                                 v,
+                                                 out=attn_output,
+                                                 **kwargs)
+        output, _ = self.o_proj(attn_output)
         return output
 
+    def naive_attn_with_masks(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        # NOTE(woosuk): As described in the comment above, this code is not
+        # meant to be performant. It is only meant to be correct.
+        q = q.view(-1, self.num_heads, self.head_dim)
+        # Expand the key and value to handle GQA.
+        num_queries_per_kv = self.num_heads // self.num_kv_heads
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        k = k.repeat_interleave(num_queries_per_kv, dim=-2)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.repeat_interleave(num_queries_per_kv, dim=-2)
 
-class BitNetDecoderLayer(nn.Module):
+        if self.is_sliding:
+            attn_masks = kwargs["local_attn_masks"]
+        else:
+            attn_masks = kwargs["global_attn_masks"]
+
+        seq_lens = kwargs["seq_lens"]
+        start_idx = 0
+        for seq_len, attn_mask in zip(seq_lens, attn_masks):
+            end_idx = start_idx + seq_len
+            query = q[start_idx:end_idx].unsqueeze(0)
+            key = k[start_idx:end_idx].unsqueeze(0)
+            value = v[start_idx:end_idx].unsqueeze(0)
+
+            # Transpose.
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+
+            output = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask,
+                self.scaling,
+            )
+            output = output.transpose(1, 2).flatten(-2, -1)
+            out[start_idx:end_idx] = output
+            start_idx = end_idx
+        return out
+
+
+class Gemma3DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: BitNetConfig,
+        config: Gemma3TextConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        # By default, BitNet uses causal attention as it is a decoder-only model.
-        # You can override the HF config with `is_causal=False` to enable
-        # bidirectional attention, which is used in some embedding models
-        # (e.g. Alibaba-NLP/gte-BitNet-7B-instruct)
-        if getattr(config, "is_causal", True):
-            attn_type = AttentionType.DECODER
-        else:
-            attn_type = AttentionType.ENCODER_ONLY
-
-        self.self_attn = BitNetAttention(
+        self.self_attn = Gemma3Attention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rms_norm_eps=config.rms_norm_eps,
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=config.head_dim,
+            max_position_embeddings=config.max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
+            attn_logits_soft_cap=None,
             prefix=f"{prefix}.self_attn",
-            attn_type=attn_type,
         )
-        self.mlp = BitNetMLP(
+        self.hidden_size = config.hidden_size
+        self.mlp = Gemma3MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            hidden_activation=config.hidden_activation,
             quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                      eps=config.rms_norm_eps)
+        self.post_feedforward_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                       eps=config.rms_norm_eps)
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -339,89 +373,61 @@ class BitNetDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
+            **kwargs,
         )
+        hidden_states = self.post_attention_layernorm(hidden_states)
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
+        hidden_states, residual = self.pre_feedforward_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    })
-class BitNetModel(nn.Module):
+@support_torch_compile
+class Gemma3Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
-            raise ValueError("Sliding window for some but all layers is not "
-                             "supported. This model uses sliding window "
-                             "but `max_window_layers` = {} is less than "
-                             "`num_hidden_layers` = {}. Please open an issue "
-                             "to discuss this feature.".format(
-                                 config.max_window_layers,
-                                 config.num_hidden_layers,
-                             ))
-
         self.config = config
         self.quant_config = quant_config
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=f"{prefix}.embed_tokens",
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
-
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BitNetDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+            lambda prefix: Gemma3DecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
+            prefix=f"{prefix}.layers")
+        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        # Normalize the embedding by sqrt(hidden_size)
+        # The normalizer's data type should be downcasted to the model's
+        # data type such as bfloat16, not float32.
+        # See https://github.com/huggingface/transformers/pull/29402
+        normalizer = self.config.hidden_size**0.5
+        self.register_buffer("normalizer", torch.tensor(normalizer))
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-        if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        # NOTE(woosuk): Only apply the normalizer to the output of
+        # vocab embedding. Don't apply it to the vision embedding.
+        return self.embed_tokens(input_ids) * self.normalizer
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -433,14 +439,12 @@ class BitNetModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
+                **kwargs,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -452,61 +456,31 @@ class BitNetModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        # stacked_params_mapping = [
-        #     # (param_name, shard_name, shard_id)
-        #     ("qkv_proj", "q_proj", "q"),
-        #     ("qkv_proj", "k_proj", "k"),
-        #     ("qkv_proj", "v_proj", "v"),
-        #     ("gate_up_proj", "gate_proj", 0),
-        #     ("gate_up_proj", "up_proj", 1),
-        # ]
-        offline_quant_params = [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-            "o_proj",
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
-        stacked_params_mapping = []
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            is_offline_quant_param = False
-            for offline_quant_param in offline_quant_params:
-                if offline_quant_param in name:
-                    if 'bias' in name:
-                        continue
-                    print(f"Loading offline quantization weights for {name}")
-                    # Loading offline quantization weights
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    loaded_weight = weight_quant_offline(loaded_weight)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
-                    is_offline_quant_param = True
-                    continue
-            if is_offline_quant_param:
-                continue
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache quantization scales
+                # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
+            for (param_name, shard_name, shard_id) in stacked_params_mapping:
+                if shard_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                name = name.replace(shard_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -529,13 +503,13 @@ class BitNetModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                print("===> name", name)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
         return loaded_params
 
 
-class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -548,46 +522,21 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-
+        del lora_config  # Unused.
+        super().__init__()
         self.config = config
-        self.lora_config = lora_config
-
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.quant_config = quant_config
-        self.model = BitNetModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-
-        if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(config.vocab_size,
-                                              config.hidden_size,
-                                              quant_config=quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"))
-            # self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
-            # self.lm_head.quant_method = UnquantizedEmbeddingMethod()
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.model = Gemma3Model(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
+        self.logits_processor = LogitsProcessor(
+            config.vocab_size, soft_cap=config.final_logit_softcapping)
         self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -598,14 +547,12 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds, **kwargs)
         return hidden_states
 
     def compute_logits(
@@ -613,7 +560,7 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -633,82 +580,3 @@ class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-class BitNetEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
-
-        self.config = config
-        self.lora_config = lora_config
-
-        self.quant_config = quant_config
-        self.model = BitNetModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-
-        # TODO: Replace this model class with as_embedding_model(
-        # BitNetForCausalLM) after changing the default pooling method
-        if pooler_config.pooling_type is None:
-            logger.warning(
-                "This embedding model will default to last-token pooling in "
-                "an upcoming version. To avoid breaking changes, you should "
-                "pass `--override-pooler-config '{\"pooling_type\": \"MEAN\"}'`"
-                " explicitly.")
-
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.MEAN,
-            normalize=True,
-            softmax=False)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
-        return self.model(input_ids, positions, kv_caches, attn_metadata,
-                          intermediate_tensors)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights = self.hf_to_vllm_mapper.apply(weights)
-        weights = ((name, data) for name, data in weights
-                   if not name.startswith("lm_head."))
-        self.model.load_weights(weights)
