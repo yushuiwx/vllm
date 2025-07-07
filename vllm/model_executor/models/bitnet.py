@@ -105,36 +105,36 @@ class BitLinear(nn.Linear):
         input = ActQuant.apply(input)
         return F.linear(input, weight, self.bias)
 
-class Gemma3MLP(nn.Module):
+# class Gemma3MLP(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_activation: str,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config)
-        if hidden_activation != "gelu_pytorch_tanh":
-            raise ValueError(
-                "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
-                "function. Please set `hidden_act` and `hidden_activation` to "
-                "`gelu_pytorch_tanh`.")
-        self.act_fn = GeluAndMul(approximate="tanh")
+#     def __init__(
+#         self,
+#         hidden_size: int,
+#         intermediate_size: int,
+#         hidden_activation: str,
+#         quant_config: Optional[QuantizationConfig] = None,
+#     ) -> None:
+#         super().__init__()
+#         self.gate_up_proj = MergedColumnParallelLinear(
+#             hidden_size, [intermediate_size] * 2,
+#             bias=False,
+#             quant_config=quant_config)
+#         self.down_proj = RowParallelLinear(intermediate_size,
+#                                            hidden_size,
+#                                            bias=False,
+#                                            quant_config=quant_config)
+#         if hidden_activation != "gelu_pytorch_tanh":
+#             raise ValueError(
+#                 "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
+#                 "function. Please set `hidden_act` and `hidden_activation` to "
+#                 "`gelu_pytorch_tanh`.")
+#         self.act_fn = GeluAndMul(approximate="tanh")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         gate_up, _ = self.gate_up_proj(x)
+#         x = self.act_fn(gate_up)
+#         x, _ = self.down_proj(x)
+#         return x
 
 class BitNetMLP(nn.Module):
 
@@ -199,7 +199,7 @@ class QKVBitLinear(BitLinear):
                          )
 
 
-class Gemma3Attention(nn.Module):
+class BitNetAttention(nn.Module):
 
     def __init__(self,
                  config: Gemma3TextConfig,
@@ -384,7 +384,7 @@ class Gemma3Attention(nn.Module):
         return out
 
 
-class Gemma3DecoderLayer(nn.Module):
+class BitNetDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -408,11 +408,18 @@ class Gemma3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         self.hidden_size = config.hidden_size
-        self.mlp = Gemma3MLP(
+        # self.mlp = Gemma3MLP(
+        #     hidden_size=self.hidden_size,
+        #     intermediate_size=config.intermediate_size,
+        #     hidden_activation=config.hidden_activation,
+        #     quant_config=quant_config,
+        # )
+        self.mlp = BitNetMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_activation=config.hidden_activation,
+            hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size,
                                             eps=config.rms_norm_eps)
@@ -451,7 +458,7 @@ class Gemma3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Gemma3Model(nn.Module):
+class BitNetModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -520,33 +527,116 @@ class Gemma3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    # def load_weights(self, weights: Iterable[Tuple[str,
+    #                                                torch.Tensor]]) -> Set[str]:
+    #     stacked_params_mapping = [
+    #         # (param_name, shard_name, shard_id)
+    #         ("qkv_proj", "q_proj", "q"),
+    #         ("qkv_proj", "k_proj", "k"),
+    #         ("qkv_proj", "v_proj", "v"),
+    #         ("gate_up_proj", "gate_proj", 0),
+    #         ("gate_up_proj", "up_proj", 1),
+    #     ]
+    #     params_dict = dict(self.named_parameters())
+    #     loaded_params: Set[str] = set()
+    #     for name, loaded_weight in weights:
+    #         if (self.quant_config is not None and
+    #             (scale_name := self.quant_config.get_cache_scale(name))):
+    #             # Loading kv cache scales for compressed-tensors quantization
+    #             param = params_dict[scale_name]
+    #             weight_loader = getattr(param, "weight_loader",
+    #                                     default_weight_loader)
+    #             loaded_weight = loaded_weight[0]
+    #             weight_loader(param, loaded_weight)
+    #             loaded_params.add(scale_name)
+    #             continue
+    #         for (param_name, shard_name, shard_id) in stacked_params_mapping:
+    #             if shard_name not in name:
+    #                 continue
+    #             name = name.replace(shard_name, param_name)
+    #             # Skip loading extra bias for GPTQ models.
+    #             if name.endswith(".bias") and name not in params_dict:
+    #                 continue
+    #             if is_pp_missing_parameter(name, self):
+    #                 continue
+    #             param = params_dict[name]
+    #             weight_loader = param.weight_loader
+    #             weight_loader(param, loaded_weight, shard_id)
+    #             break
+    #         else:
+    #             # Skip loading extra bias for GPTQ models.
+    #             if name.endswith(".bias") and name not in params_dict:
+    #                 continue
+    #             # Remapping the name of FP8 kv-scale.
+    #             name = maybe_remap_kv_scale_name(name, params_dict)
+    #             if name is None:
+    #                 continue
+    #             if is_pp_missing_parameter(name, self):
+    #                 continue
+    #             param = params_dict[name]
+    #             weight_loader = getattr(param, "weight_loader",
+    #                                     default_weight_loader)
+    #             weight_loader(param, loaded_weight)
+    #         loaded_params.add(name)
+
+    #     return loaded_params
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+        # stacked_params_mapping = [
+        #     # (param_name, shard_name, shard_id)
+        #     ("qkv_proj", "q_proj", "q"),
+        #     ("qkv_proj", "k_proj", "k"),
+        #     ("qkv_proj", "v_proj", "v"),
+        #     ("gate_up_proj", "gate_proj", 0),
+        #     ("gate_up_proj", "up_proj", 1),
+        # ]
+        offline_quant_params = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "o_proj",
         ]
-        params_dict = dict(self.named_parameters())
+        stacked_params_mapping = []
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+            is_offline_quant_param = False
+            for offline_quant_param in offline_quant_params:
+                if offline_quant_param in name:
+                    if 'bias' in name:
+                        continue
+                    print(f"Loading offline quantization weights for {name}")
+                    # Loading offline quantization weights
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    loaded_weight = weight_quant_offline(loaded_weight)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
+                    is_offline_quant_param = True
+                    continue
+            if is_offline_quant_param:
+                continue
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for compressed-tensors quantization
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            for (param_name, shard_name, shard_id) in stacked_params_mapping:
-                if shard_name not in name:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
                     continue
-                name = name.replace(shard_name, param_name)
+                name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -569,13 +659,13 @@ class Gemma3Model(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
+                print("===> name", name)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
         return loaded_params
 
 
-class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class BitNetForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -598,7 +688,7 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # currently all existing Gemma models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.quant_config = quant_config
-        self.model = Gemma3Model(vllm_config=vllm_config,
+        self.model = BitNetModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
