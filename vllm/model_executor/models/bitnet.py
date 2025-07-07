@@ -395,7 +395,7 @@ class BitNetDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Gemma3Attention(
+        self.self_attn = BitNetAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
