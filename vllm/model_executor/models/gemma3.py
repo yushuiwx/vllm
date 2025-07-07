@@ -140,7 +140,7 @@ class Gemma3Attention(nn.Module):
         layer_idx = extract_layer_index(prefix)
         self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
         # Initialize the rotary embedding.
-        print("config", config)
+        print("config", config, "is_sliding", self.is_sliding)
         if self.is_sliding:
             # Local attention. Override the values in config.json.
             self.rope_theta = config.rope_local_base_freq
