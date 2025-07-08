@@ -164,9 +164,9 @@ class BitNetMLP(nn.Module):
     #     return down_proj
     def forward(self, x):
         gate = self.gate_proj(x)
-        x = self.act_fn(gate)
+        act = self.act_fn(gate)
         up = self.up_proj(x)
-        x = x * up
+        x = act * up
         x = self.down_proj(x)
         return x
 
