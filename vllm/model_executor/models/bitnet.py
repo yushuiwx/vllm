@@ -143,7 +143,7 @@ class BitNetMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
+        hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
