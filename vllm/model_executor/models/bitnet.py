@@ -157,7 +157,7 @@ class BitNetMLP(nn.Module):
                 "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
                 "`gelu_pytorch_tanh`.")
-        self.act_fn = GeluAndMul(approximate="tanh")
+        self.act_fn = Gelu(approximate="tanh")
 
     # def forward(self, x):
     #     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
