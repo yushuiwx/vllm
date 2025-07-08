@@ -298,8 +298,11 @@ class BitNetAttention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
 
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
         q = self.q_norm(q)
