@@ -159,10 +159,16 @@ class BitNetMLP(nn.Module):
                 "`gelu_pytorch_tanh`.")
         self.act_fn = GeluAndMul(approximate="tanh")
 
+    # def forward(self, x):
+    #     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    #     return down_proj
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
+        gate = self.gate_proj(x)
+        x = self.act_fn(gate)
+        up = self.up_proj(x)
+        x = x * up
+        x = self.down_proj(x)
+        return x
 
 class QKVBitLinear(BitLinear):
 
