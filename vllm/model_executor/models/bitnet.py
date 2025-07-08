@@ -647,7 +647,7 @@ class BitNetModel(nn.Module):
                 if offline_quant_param in name:
                     if 'bias' in name:
                         continue
-                    print(f"Loading offline quantization weights for {name}")
+                    print(f"Loading offline quantization weights for {name}", loaded_weight.shape)
                     # Loading offline quantization weights
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
