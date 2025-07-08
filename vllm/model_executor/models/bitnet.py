@@ -157,18 +157,19 @@ class BitNetMLP(nn.Module):
                 "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
                 "`gelu_pytorch_tanh`.")
-        self.act_fn = nn.Gelu(approximate="tanh")
+        self.act_fn = nn.GELU(approximate="tanh")
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
 
     # def forward(self, x):
-    #     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-    #     return down_proj
-    def forward(self, x):
-        gate = self.gate_proj(x)
-        act = self.act_fn(gate)
-        up = self.up_proj(x)
-        x = act * up
-        x = self.down_proj(x)
-        return x
+    #     gate = self.gate_proj(x)
+    #     act = self.act_fn(gate)
+    #     up = self.up_proj(x)
+    #     x = act * up
+    #     x = self.down_proj(x)
+    #     return x
 
 class QKVBitLinear(BitLinear):
 
