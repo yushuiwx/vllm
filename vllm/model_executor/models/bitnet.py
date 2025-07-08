@@ -292,52 +292,82 @@ class BitNetAttention(nn.Module):
                               per_layer_sliding_window=self.sliding_window,
                               prefix=f"{prefix}.attn")
 
+    # def forward(
+    #     self,
+    #     positions: torch.Tensor,
+    #     hidden_states: torch.Tensor,
+    #     **kwargs,
+    # ) -> torch.Tensor:
+    #     # qkv, _ = self.qkv_proj(hidden_states)
+    #     # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+    #     q = self.q_proj(hidden_states)
+    #     k = self.k_proj(hidden_states)
+    #     v = self.v_proj(hidden_states)
+
+    #     q = q.unflatten(-1, (self.num_heads, self.head_dim))
+    #     q = self.q_norm(q)
+    #     q = q.flatten(-2, -1)
+    #     k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+    #     k = self.k_norm(k)
+    #     k = k.flatten(-2, -1)
+
+    #     q, k = self.rotary_emb(positions, q, k)
+    #     attn_output = self.attn(q, k, v)
+
+    #     if not kwargs.get("has_images", False):
+    #         # Fast path for text-only inputs. The performance for the text-only
+    #         # inputs are not affected by the naive attention below.
+    #         output = self.o_proj(attn_output)
+    #         return output
+
+    #     # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
+    #     # that correspond to the same image while using causal attention
+    #     # otherwise. Current attention backends cannot handle this pattern, so
+    #     # we temporarily use a naive attention implementation with mask tensors.
+
+    #     # We intentionally keep the attention backend as-is and only override
+    #     # `attn_output` with the naive implementation's output. This minimizes
+    #     # changes to existing model runners and attention backends. The call to
+    #     # `self.attn(q, k, v)` is only used to populate the KV cache - its
+    #     # output is discarded and overwritten below. While this duplicates
+    #     # computation, it maintains compatibility.
+    #     # TODO(woosuk): Optimize by implementing custom attention kernels.
+    #     attn_output = self.naive_attn_with_masks(q,
+    #                                              k,
+    #                                              v,
+    #                                              out=attn_output,
+    #                                              **kwargs)
+    #     # output, _ = self.o_proj(attn_output)
+    #     output = self.o_proj(attn_output)
+    #     return output
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        **kwargs,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # qkv, _ = self.qkv_proj(hidden_states)
-        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = self.q_proj(hidden_states)
+
+        # qwen3 norm for q values
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
         k = self.k_proj(hidden_states)
+
+        # qwen3 norm for k values
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+
+
         v = self.v_proj(hidden_states)
-
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        k = self.k_norm(k)
-        k = k.flatten(-2, -1)
-
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-
-        if not kwargs.get("has_images", False):
-            # Fast path for text-only inputs. The performance for the text-only
-            # inputs are not affected by the naive attention below.
-            output = self.o_proj(attn_output)
-            return output
-
-        # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
-        # that correspond to the same image while using causal attention
-        # otherwise. Current attention backends cannot handle this pattern, so
-        # we temporarily use a naive attention implementation with mask tensors.
-
-        # We intentionally keep the attention backend as-is and only override
-        # `attn_output` with the naive implementation's output. This minimizes
-        # changes to existing model runners and attention backends. The call to
-        # `self.attn(q, k, v)` is only used to populate the KV cache - its
-        # output is discarded and overwritten below. While this duplicates
-        # computation, it maintains compatibility.
-        # TODO(woosuk): Optimize by implementing custom attention kernels.
-        attn_output = self.naive_attn_with_masks(q,
-                                                 k,
-                                                 v,
-                                                 out=attn_output,
-                                                 **kwargs)
-        # output, _ = self.o_proj(attn_output)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output = self.o_proj(attn_output)
         return output
 
