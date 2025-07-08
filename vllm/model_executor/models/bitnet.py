@@ -419,7 +419,7 @@ class BitNetDecoderLayer(nn.Module):
         self.mlp = BitNetMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            hidden_activation=config.hidden_activation,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
