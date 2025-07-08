@@ -346,7 +346,8 @@ class BitNetAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        # attn_metadata: AttentionMetadata,
+        **kwargs,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
 
@@ -367,7 +368,7 @@ class BitNetAttention(nn.Module):
 
         v = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, **kwargs)
         output = self.o_proj(attn_output)
         return output
 
