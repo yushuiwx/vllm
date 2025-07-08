@@ -317,7 +317,7 @@ class BitNetAttention(nn.Module):
         if not kwargs.get("has_images", False):
             # Fast path for text-only inputs. The performance for the text-only
             # inputs are not affected by the naive attention below.
-            output, _ = self.o_proj(attn_output)
+            output = self.o_proj(attn_output)
             return output
 
         # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
