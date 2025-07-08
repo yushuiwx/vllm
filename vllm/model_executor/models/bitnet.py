@@ -300,7 +300,6 @@ class BitNetAttention(nn.Module):
     ) -> torch.Tensor:
         # qkv, _ = self.qkv_proj(hidden_states)
         # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        print("*" * 200)
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
