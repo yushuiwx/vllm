@@ -337,7 +337,8 @@ class BitNetAttention(nn.Module):
                                                  v,
                                                  out=attn_output,
                                                  **kwargs)
-        output, _ = self.o_proj(attn_output)
+        # output, _ = self.o_proj(attn_output)
+        output = self.o_proj(attn_output)
         return output
 
     def naive_attn_with_masks(
