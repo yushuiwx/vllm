@@ -79,12 +79,57 @@ class WeightQuant(torch.autograd.Function):
         return grad_input
 
 
-def weight_quant_offline(x):
-    dtype = x.dtype
-    x = x.float()
-    s = 1.0 / x.abs().mean().clamp_(min=1e-5)
-    x = (x * s).round().clamp(-1, 1) / s
-    return x.to(dtype)
+# def weight_quant_offline(x):
+#     dtype = x.dtype
+#     x = x.float()
+#     s = 1.0 / x.abs().mean().clamp_(min=1e-5)
+#     x = (x * s).round().clamp(-1, 1) / s
+#     return x.to(dtype)
+
+def weight_block_quant_offline(w, block_size=256):
+    dtype = w.dtype
+    w = w.float()
+
+    if w.dim() < 2:
+        # Fallback to regular quantization for 1D tensors
+        scale = 1.0 / w.abs().mean().clamp_(min=1e-5)
+        u = (w * scale).round().clamp_(-1, 1) / scale
+        return u
+    
+    original_shape = w.shape
+    total_elements = w.numel()
+    
+    # Flatten completely
+    w_flat = w.view(-1)
+    
+    # Calculate number of blocks
+    num_blocks = (total_elements + block_size - 1) // block_size
+    
+    # Pad if necessary
+    if total_elements % block_size != 0:
+        pad_size = num_blocks * block_size - total_elements
+        w_flat = torch.cat([w_flat, torch.zeros(pad_size, device=w.device, dtype=w.dtype)])
+    
+    # Reshape into blocks: [num_blocks, block_size]
+    w_blocks = w_flat.view(num_blocks, block_size)
+    
+    # Compute scale for each block: [num_blocks, 1]
+    scales = 1.0 / w_blocks.abs().mean(dim=1, keepdim=True).clamp_(min=1e-5)
+    
+    # Quantize each block
+    u_blocks = (w_blocks * scales).round().clamp_(-1, 1) / scales
+    
+    # Reshape back to flat format
+    u_flat = u_blocks.view(-1)
+    
+    # Remove padding if it was added
+    if total_elements % block_size != 0:
+        u_flat = u_flat[:total_elements]
+    
+    # Reshape back to original shape
+    u = u_flat.view(original_shape)
+    
+    return u.to(dtype)
 
 class ActQuant(torch.autograd.Function):
 
@@ -485,7 +530,7 @@ class BitNetModel(nn.Module):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
-                    loaded_weight = weight_quant_offline(loaded_weight)
+                    loaded_weight = weight_block_quant_offline(loaded_weight)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                     is_offline_quant_param = True
