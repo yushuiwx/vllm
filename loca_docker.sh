@@ -1,0 +1,1 @@
+docker run --privileged --net=host --ipc=host --gpus=all -v $(pwd):$(pwd) -w /tmp -it yushuiwx/moe-tts-verl:v1

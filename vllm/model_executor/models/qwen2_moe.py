@@ -161,7 +161,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(orig_shape)
+        return final_hidden_states.view(orig_shape), router_logits
 
 
 class Qwen2MoeAttention(nn.Module):
@@ -316,8 +316,8 @@ class Qwen2MoeDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        hidden_states, router_logits = self.mlp(hidden_states)
+        return hidden_states, residual, router_logits
 
 
 @support_torch_compile
@@ -349,6 +349,8 @@ class Qwen2MoeModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        self.all_router_logits = []
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -369,8 +371,19 @@ class Qwen2MoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        # 当前 forward 的 router logits
+        current_router_logits = []
+        
         for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual, router_logits = layer(positions, hidden_states, residual)
+            if router_logits is not None:
+                current_router_logits.append(router_logits.detach().cpu())
+            
+        # 存储这次 forward 的 router logits
+        if current_router_logits and get_pp_group().is_last_rank:
+            self.all_router_logits.append(current_router_logits)
+            
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -378,7 +391,12 @@ class Qwen2MoeModel(nn.Module):
             })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
+    
+    def get_and_clear_router_logits(self):
+        """获取并清空 router logits"""
+        logits = self.all_router_logits.copy()
+        self.all_router_logits = []
+        return logits
 
 class Qwen2MoeForCausalLM(nn.Module, SupportsPP):
 
