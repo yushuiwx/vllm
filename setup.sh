@@ -1,0 +1,1 @@
+VLLM_USE_PRECOMPILED=1 pip install --editable .
